@@ -282,6 +282,87 @@ def getindices(s):
     return [i for i, c in enumerate(s) if c.isupper()]
 
 
+def orderfeatures(fragment,strand,alen):
+	ftheader=['Type','Distance','Start','End','Compound','Group']
+	feats = [feat for feat in fragment.features if feat.strand == strand and feat.type in ['Operon', 'gene']]
+	fmap={}
+	features={}
+	isgene=False
+	isoperon=False
+	overlap=False
+	flen = fragment.__len__()
+
+	#Order by distance
+	fmap={fid:ftpos(ft,flen)[0]-alen for fid,ft in enumerate(feats)}
+	order = sorted(fmap, key=fmap.get)
+	ofeats = [feats[i] for i in order]
+
+
+	fmap2={fid:ftpos(ft,flen)[0]-alen for fid,ft in enumerate(ofeats)}
+
+	grouping=groupfeatures(fmap2,2)
+
+	firstgene=False
+	firstoperon=False
+	overlapping={}
+	firsts={}
+
+	for fid,ft in enumerate(ofeats):
+		frstart,frend=ftpos(ft,flen)
+		dist = frstart-alen
+		Compound = True if type(ft.location).__name__=="CompoundLocation" else False
+
+		if ft.type=='gene':
+			isgene=True
+		if ft.type=='Operon':
+			isoperon=True
+		if dist<0:
+			overlapping[fid]=ft
+		if ft.type=='gene' and not firstgene:
+			firstgene=True
+			firsts[fid]=ft
+		if ft.type=='Operon' and not firstoperon:
+			firstoperon=True
+			firsts[fid]=ft
+
+		features[fid] = {hd:val for hd,val in IT.izip(ftheader,[ft.type,dist,frstart,frend,Compound,grouping[fid]]) }
+
+	return ofeats, features, isgene, isoperon, overlapping, firsts
+
+
+def ftpos(ft,flen):
+	fstart = ft.location._start if type(ft.location).__name__ == "FeatureLocation" else ft.location.nofuzzy_start
+	fend = ft.location._end if type(ft.location).__name__ == "FeatureLocation" else ft.location.nofuzzy_end
+
+	frstart = fstart if strand == 1 else flen - fend
+	frend = fend if strand == 1 else flen - fstart
+	return frstart,frend
+
+
+def groupfeatures(fmap,thres):
+	grouping={}
+	group=1
+	for i in fmap.keys()[1:]:
+		if fmap[i]-fmap[i-1]<thres:
+			grouping[i]= group
+			grouping[i-1] = group
+			group+=1
+	left=[k for k in fmap.keys() if k not in grouping.keys()]
+	for i in left:
+		grouping[i] = group
+		group += 1
+
+	return grouping
+
+
+
+
+
+
+
+
+
+
 
 os.chdir("/Users/Povilas/Dropbox/Projects/2015-Metformin/Annotations/Ecoli/UAL")
 
@@ -297,11 +378,6 @@ data=maptable(info_file)
 # 	print id,f.type, f.location.start, f.location.end, f.location.strand, ','.join(f.qualifiers['gene']) if f.type == 'gene' else ''
 
 
-
-
-
-
-
 # Collect primers
 # Create input file of suitable primers to search ... suitably numbered.
 # Note the key is constructed to be a suitable BLAST primer sequence to search.
@@ -309,8 +385,8 @@ data=maptable(info_file)
 
 
 
-genome_file = "../Genome/Ecoli_K12_MG1655_U00096.3.gb"#.format(gen)
-genome = SeqIO.read(genome_file, "genbank")
+#genome_file = "../Genome/Ecoli_K12_MG1655_U00096.3.gb"#.format(gen)
+#genome = SeqIO.read(genome_file, "genbank")
 
 
 
@@ -405,7 +481,7 @@ fh.close()
 
 
 for key in names_Manual:#names_UAL:
-	print key, data[key]['Gene_Name'],data[key]['Strand'],data[key]['Strand_annotation']
+	print key, data[key]['Gene_Name'],data[key]['Strand'],data[key]['Strand_manual'],data[key]['Strand_annotation']
 
 
 
@@ -530,6 +606,7 @@ csvwriter(table,'Amplicons_{}.csv'.format(ECgenome))
 
 
 #Map amplicons to genome
+#Now position coordinates of amplicons are oriented on forward strand
 
 genome = SeqIO.read(genome_file, "genbank")
 ti={hd:ind for ind, hd in enumerate(header)}
@@ -561,10 +638,14 @@ for rw in table[1:]:
 			end=int(rw[ti['Primer2_target_end']])
 			if end>start:
 				strd=1
+				truestart=start
+				trueend=end
 			else:
 				strd=-1
+				truestart=end
+				trueend=start
 			#print '{} Start:{}, End:{}'.format(indexa,start,end)
-			seq_feature=SeqFeature(FeatureLocation(start,end, strand=strd), type="Amplicon", \
+			seq_feature=SeqFeature(FeatureLocation(truestart,trueend, strand=strd), type="Amplicon", \
 			                       id=indexa,\
 			                       qualifiers={'Plate':plate,'Well':well,'Gene':gene_name,\
 			                                   'Amplicon':amplicon,\
@@ -629,7 +710,8 @@ faf.close()
 
 
 
-#Map primer regions
+
+#Map promoter regions
 
 
 Prom_file="../Transcription_Factors/Promoters.csv"
@@ -654,6 +736,7 @@ for ln in Prom_data[1:]:
 
 
 	print Promid, Promoter_name, TSS, TSSid, Promlen
+
 	Prom_start = TSS-TSSid if strd==1 else TSS+TSSid
 	Prom_end = TSS+(Promlen-TSSid) if strd==1 else TSS-(Promlen-TSSid)
 
@@ -679,27 +762,194 @@ faf.close()
 
 
 
-#Find limits of region
 
-amplicons_feat=[ind for ind, itm in enumerate(genomeprom.features) if itm.type=='Amplicon']
+#Map operons
+
+Oper_file="../Transcription_Factors/Operons.csv"
+Oper_data=readcsv(Oper_file,delim=',')
+
+genomeoperon = SeqIO.read(amplicons_Proms, "genbank")
+amplicons_Operons='{}_amplicons_TFBS_Prom_Operon.gb'.format(ECgenome)
+
+#Header index
+Operindex={itm:ind  for ind, itm in enumerate(Oper_data[0])}
+
+col='255 153 0'
+
+for ln in Oper_data[1:]:
+	Operon = ln[Operindex['Operon']]
+	#In pyhton indexing starts at 0
+	Oper_start = int(ln[Operindex['Start']])-1
+	Oper_end = int(ln[Operindex['End']])-1
+	strd = 1 if ln[Operindex['Direction']] == 'forward' else -1
+	Oper_genes=ln[Operindex['Genes']]
 
 
-for ampfid in amplicons_feat:
-	amplicon=genomeprom.features[ampfid]
+	print Operon, Oper_start, Oper_end, strd, Oper_genes
+
+	# if strd==1:
+	# 	truestart=Oper_start
+	# 	trueend=Oper_end
+	# else:
+	# 	truestart=Oper_end
+	# 	trueend=Oper_start
+	# if TSS > 0 and Promlen > 0:
+	# 	#Only perfect matches
+
+	seq_feature=SeqFeature(FeatureLocation(Oper_start,Oper_end, strand=strd), type="Operon", \
+	                       id=Operon,\
+	                       qualifiers={'Operon_name':Operon, \
+	                                   'Genes': Oper_genes,\
+	                                   'Gene_no': int(ln[Operindex['Genes_no']]),\
+	                                   'Evidence': ln[Operindex['Evidence']],
+	                                   'Confidence': ln[Operindex['Confidence']], \
+	                                   'Strand':strd,\
+	                                   'colour':col})
+	genomeoperon.features.append(seq_feature)
+
+
+faf = open(amplicons_Operons, 'w')
+SeqIO.write(genomeoperon, faf, "gb")
+faf.close()
+
+#When GB files is saved, features become list?
+
+
+
+#Something wrong with features that are read....
+#genomeoperon=SeqIO.read("Ecoli_K12_MG1655_U00096.3_amplicons_TFBS_Prom_Operon.gb", "genbank")
+
+
+
+
+
+
+#Find nearest features
+
+expansion=5000
+
+amplicons_feat=[ind for ind, itm in enumerate(genomeoperon.features) if itm.type=='Amplicon']
+
+
+amplicons_map={ str(itm.qualifiers['Gene'][0]) : itm for itm in genomeoperon.features if itm.type=='Amplicon'}
+
+
+operons_map={ str(itm.qualifiers['Operon_name']) : itm for itm in genomeoperon.features if itm.type=='Operon'}
+
+#operons_map2={ str(itm.qualifiers['Operon_name'][0]) : itm for itm in genomeoperon2.features if itm.type=='Operon'}
+
+
+
+amplicons_map['ribE']
+
+ampl=amplicons_map['yagE']
+
+
+opr=operons_map['yagEF']
+
+
+opr.location._end-opr.location._start
+
+
+
+astart=ampl.location._start
+aend=ampl.location._end
+
+aend-astart
+
+[ ft for ft in genomeoperon[astart:aend+expansion].features if ft.strand==ampl.strand]
+
+
+
+header=['UAL_promoter','Plate','Well','Strand','Type','Distance','Group','Name','Genes']
+mappingdata=[]
+mappingdata.append(header)
+
+
+for ampfid in amplicons_feat: #[9799]:#
+	amplicon=genomeoperon.features[ampfid]
 	strand=amplicon.strand
+	agene=amplicon.qualifiers['Gene'][0]
+	aplate=amplicon.qualifiers['Plate'][0]
+	awell=amplicon.qualifiers['Well'][0]
+
 	astart=amplicon.location._start
 	aend=amplicon.location._end
+	alen = aend - astart
 
-	fragment=genomeprom[astart:aend].features if strand==1 else genomeprom[aend:astart].features
-	feats=[ feat for feat in fragment if feat.strand==strand and feat.type!='Amplicon']
-	print '\t',amplicon.qualifiers['Gene'],amplicon.qualifiers['Plate'],amplicon.qualifiers['Well'], len(feats)
+	extend=expansion
+	while 1:
+		fragment = genomeoperon[astart:aend+extend] if strand == 1 else genomeoperon[astart-extend:aend]
+		feats, features, isgene, isoperon, overlapping, firsts=orderfeatures(fragment,strand,alen)
+		if len(feats)>2 and isgene and isoperon:
+			break
+		extend=extend+2000
+		if extend>100000:
+			break
 
-	fgroups={}
-	for ft in feats:
-		ftype=ft.type
+
+	flen=fragment.__len__()
+	ftypes=[ft.type for ft in feats]
+
+	print '\t', strand, alen, amplicon.qualifiers['Gene'],amplicon.qualifiers['Plate'], amplicon.qualifiers['Well'], len(feats), extend, ftypes
+	#print features
+
+	if len(overlapping)>0:
+		selfeats=overlapping
+	else:
+		selfeats=firsts
+
+	for fid,ft in selfeats.iteritems():
+		finfo=features[fid]
+
+		if ft.type=='Operon':
+			ftname=ft.qualifiers['Operon_name']
+			ftgenes=ft.qualifiers['Genes']
+		else:
+			ftname=ft.qualifiers['gene'][0]
+			ftgenes=ftname
+
+		#if finfo['Distance']<0:
+		row=[agene,aplate,awell, str(strand), ft.type,finfo['Distance'],finfo['Group'], ftname, ftgenes]
+		mappingdata.append(row)
 
 
 
+
+csvwriter(mappingdata, 'Gene_Operon_mapping_{}.csv'.format(ECgenome))
+
+
+
+
+fmap={fid:ftpos(ft,flen)[0]-alen for fid,ft in enumerate(feats)}
+
+
+
+#How to deal with compound locations
+ft=feats[2]
+
+
+feats[1].location
+
+type(feats[2].location).__name__=="CompoundLocation"
+
+
+
+
+#For genes on reverse strand positions are not reversed
+
+#Find downstream operon
+#Search downstream till the first operon
+#Check distance between amplicon end and operon start
+
+
+amplicons_map['yncA'].location._start
+amplicons_map['yncA'].location._end
+
+
+
+operons_map['mnaT-ydcZ'].location._start
+operons_map['mnaT-ydcZ'].location._end
 
 
 
