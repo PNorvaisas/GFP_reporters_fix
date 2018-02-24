@@ -4,3 +4,4 @@ Reannotation of E. coli transcriptional reporter library (Zaslaver et al. 2006) 
 - Identification of problematic amplicons and manual error-checking
 - Cross-check with RegulonDB
 - Linking of amplicons to promoters and their downstream genes
+- Script in GFP_fix.py
